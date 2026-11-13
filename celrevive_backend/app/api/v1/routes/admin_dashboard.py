@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import os
@@ -242,7 +243,10 @@ async def serve_session_image(
         raise HTTPException(status_code=404, detail="Image not found")
 
     try:
-        image_bytes = read_image_bytes(skin_image.storage_uri)
+        image_bytes = await asyncio.to_thread(
+            read_image_bytes,
+            skin_image.storage_uri,
+        )
     except Exception as exc:
         raise HTTPException(status_code=404, detail="Image file missing from disk") from exc
 

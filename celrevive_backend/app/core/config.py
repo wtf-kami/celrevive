@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     QUESTIONNAIRE_AI_MODEL: str = "gemini-2.5-flash"
     FORMULATION_AI_MODEL: str = "gemini-2.5-flash"
     GEMINI_API_KEY: str | None = None
-    SUPABASE_URL: str
-    SUPABASE_SERVICE_ROLE_KEY: str
+    SUPABASE_URL: str | None = None
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None
     SUPABASE_STORAGE_BUCKET: str = "skin-images"
 
     # --- File constraints ---

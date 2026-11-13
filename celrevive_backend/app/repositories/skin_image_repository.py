@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from sqlalchemy import select, text, update
@@ -66,4 +67,5 @@ async def get_image_bytes_and_mime(
 ) -> tuple[bytes, str]:
     result = await db.execute(select(SkinImage).where(SkinImage.image_id == image_id))
     image = result.scalar_one()
-    return read_image_bytes(image.storage_uri), image.mime_type or "application/octet-stream"
+    image_bytes = await asyncio.to_thread(read_image_bytes, image.storage_uri)
+    return image_bytes, image.mime_type or "application/octet-stream"
