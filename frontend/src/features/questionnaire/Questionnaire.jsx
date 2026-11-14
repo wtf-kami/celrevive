@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ArrowRight, ArrowLeft, Loader2, RefreshCcw } from 'lucide-react';
 import { submitQuestionnaire } from '../../api';
 import { useSessionStore } from '../../store/useSessionStore';
@@ -13,11 +13,65 @@ export default function Questionnaire({ onComplete }) {
   const sessionId = useSessionStore((state) => state.sessionId);
   const clearSession = useSessionStore((state) => state.clearSession);
 
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    const savedIdx = window.history.state?.questionIndex;
+    return typeof savedIdx === 'number' &&
+      savedIdx >= 0 &&
+      savedIdx < QUESTIONS.length
+      ? savedIdx
+      : 0;
+  });
   const [answers, setAnswers] = useState({});
   const [additionalDetails, setAdditionalDetails] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+
+  const isQuestionPopState = useRef(false);
+
+  // 1. Sync browser Back/Forward buttons with individual question index
+  useEffect(() => {
+    if (
+      window.history.state?.step !== 'questionnaire' ||
+      typeof window.history.state?.questionIndex !== 'number'
+    ) {
+      window.history.replaceState(
+        { step: 'questionnaire', questionIndex: currentIndex },
+        ''
+      );
+    }
+
+    const handleQuestionPopState = (event) => {
+      if (
+        event.state?.step === 'questionnaire' &&
+        typeof event.state.questionIndex === 'number'
+      ) {
+        isQuestionPopState.current = true;
+        setSubmitError('');
+        setCurrentIndex(event.state.questionIndex);
+      }
+    };
+
+    window.addEventListener('popstate', handleQuestionPopState);
+    return () => window.removeEventListener('popstate', handleQuestionPopState);
+  }, []);
+
+  // 2. Push new history entry whenever the user advances to a new question via UI
+  useEffect(() => {
+    if (isQuestionPopState.current) {
+      isQuestionPopState.current = false;
+      return;
+    }
+
+    if (
+      window.history.state?.step === 'questionnaire' &&
+      window.history.state?.questionIndex !== currentIndex
+    ) {
+      window.history.pushState(
+        { step: 'questionnaire', questionIndex: currentIndex },
+        ''
+      );
+    }
+  }, [currentIndex]);
 
   const currentQuestion = QUESTIONS[currentIndex];
   const isMulti = currentQuestion.type === 'multi';
@@ -82,9 +136,17 @@ export default function Questionnaire({ onComplete }) {
   };
 
   const handlePrevious = () => {
-    if (currentIndex > 0) {
+    if (currentIndex > 0 && !isSubmitting) {
       setSubmitError('');
-      setCurrentIndex((prev) => prev - 1);
+      // Pop the browser history stack so UI "Previous" and Browser "Back" stay in sync
+      if (
+        window.history.state?.step === 'questionnaire' &&
+        window.history.state?.questionIndex === currentIndex
+      ) {
+        window.history.back();
+      } else {
+        setCurrentIndex((prev) => prev - 1);
+      }
     }
   };
 

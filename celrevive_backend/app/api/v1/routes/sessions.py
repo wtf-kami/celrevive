@@ -1,6 +1,7 @@
+import logging
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +33,7 @@ from app.workers.recommendation_task import run_questionnaire_analysis
 from app.services.shopify_order_service import create_and_complete_zero_cost_order
 
 router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 
 
 @router.post(
@@ -126,6 +128,7 @@ async def get_image_analysis_status(
     if session.session_status in {
         "RECOMMENDATION_GENERATED",
         "CONCERNS_COMBINED",
+        "ORDER_PLACED",
     }:
         concerns = await get_detected_image_concerns_by_session(
             db,
@@ -275,6 +278,7 @@ async def get_session_recommendation(
         detail="Recommendation is not available yet.",
     )
 
+
 @router.post(
     "/sessions/{session_id}/place-order",
     status_code=status.HTTP_200_OK,
@@ -284,14 +288,23 @@ async def place_session_order(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     try:
+        # Lock the session row so concurrent requests cannot place duplicate orders
         session_result = await db.execute(
-            select(CustomerSession).where(CustomerSession.session_id == session_id)
+            select(CustomerSession)
+            .where(CustomerSession.session_id == session_id)
+            .with_for_update()
         )
         session = session_result.scalar_one_or_none()
         if session is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Customer session not found.",
+            )
+
+        if session.session_status == "ORDER_PLACED" or session.shopify_checkout_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An order has already been placed for this session.",
             )
 
         rec_response = await get_session_recommendation(
@@ -304,7 +317,7 @@ async def place_session_order(
             else dict(rec_response)
         )
 
-        return await create_and_complete_zero_cost_order(
+        order_result = await create_and_complete_zero_cost_order(
             session_id=str(session_id),
             shopify_customer_id=getattr(session, "shopify_customer_id", None),
             shopify_customer_email=getattr(session, "shopify_customer_email", None),
@@ -315,11 +328,19 @@ async def place_session_order(
             formulation_weight_g=rec_data.get("formulation_weight_g"),
             recommended_actives=rec_data.get("recommended_actives") or [],
         )
+
+        # Persist order placement in the database to permanently block duplicates
+        session.session_status = "ORDER_PLACED"
+        session.shopify_checkout_id = str(
+            order_result.get("order_id") or order_result.get("draft_order_id") or "PLACED"
+        )
+        await db.commit()
+
+        return order_result
     except HTTPException:
         raise
     except Exception as exc:
-        import logging
-        logging.getLogger("uvicorn.error").exception("place_session_order failed")
+        logger.exception("place_session_order failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"place_session_order error: {type(exc).__name__}: {str(exc)}",

@@ -3,6 +3,8 @@ import { Sparkles, Loader2, RefreshCcw, Check } from 'lucide-react';
 import { pollRecommendation, placeOrder } from '../../api';
 import { useSessionStore } from '../../store/useSessionStore';
 
+const CUSTOM_FORMULA_VARIANT_ID = 68105686417728;
+
 const SKIN_TYPE_LABELS = {
   normal: 'Normal Skin',
   dry: 'Dry Skin',
@@ -25,6 +27,10 @@ const NORMAL_TEXT_STYLE = {
   WebkitTextStroke: '0px',
   color: '#4b5563',
 };
+
+function getOrderStorageKey(sessionId) {
+  return `celrevive_order_placed_${sessionId}`;
+}
 
 function escapeRegExp(str = '') {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -69,8 +75,21 @@ export default function RecommendationPage({ shopifyUser }) {
   const [isPolling, setIsPolling] = useState(true);
   const [error, setError] = useState(null);
 
+  const [isAddingToCart, setIsAddingToCart] = useState(false);
+  const [cartAdded, setCartAdded] = useState(false);
+  const [isAddHovered, setIsAddHovered] = useState(false);
+
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
-  const [placedOrder, setPlacedOrder] = useState(null);
+  const [placedOrder, setPlacedOrder] = useState(() => {
+    if (!sessionId) return null;
+    try {
+      const saved = localStorage.getItem(getOrderStorageKey(sessionId));
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isOrderHovered, setIsOrderHovered] = useState(false);
   const [orderError, setOrderError] = useState('');
 
   useEffect(() => {
@@ -80,6 +99,16 @@ export default function RecommendationPage({ shopifyUser }) {
       return;
     }
 
+    // Restore placedOrder state if sessionId changed or page refreshed
+    try {
+      const saved = localStorage.getItem(getOrderStorageKey(sessionId));
+      if (saved) {
+        setPlacedOrder(JSON.parse(saved));
+      }
+    } catch {
+      // ignore storage errors
+    }
+
     let isMounted = true;
 
     const fetchResults = async () => {
@@ -87,6 +116,23 @@ export default function RecommendationPage({ shopifyUser }) {
         const data = await pollRecommendation(sessionId);
         if (isMounted) {
           setResult(data);
+          // Also check if backend returned an order_placed flag/status
+          if (
+            data?.order_placed ||
+            data?.status === 'ORDER_PLACED' ||
+            data?.session_status === 'ORDER_PLACED'
+          ) {
+            const orderInfo = { status: 'ORDER_PLACED' };
+            setPlacedOrder(orderInfo);
+            try {
+              localStorage.setItem(
+                getOrderStorageKey(sessionId),
+                JSON.stringify(orderInfo)
+              );
+            } catch {
+              // ignore storage errors
+            }
+          }
           setIsPolling(false);
         }
       } catch (err) {
@@ -164,6 +210,86 @@ export default function RecommendationPage({ shopifyUser }) {
     ? ` (${data.formulation_weight_g}g)`
     : '';
 
+  const handleAddToCart = async () => {
+    if (!sessionId || isAddingToCart || isPlacingOrder) return;
+    setIsAddingToCart(true);
+    setOrderError('');
+
+    try {
+      const baseName = recommendedBase?.base_name || 'Custom Base';
+      const weightG = data.formulation_weight_g || 100;
+      const activesSummary =
+        recommendedActives
+          .map((a) => {
+            if (!a) return '';
+            if (typeof a === 'string') return a;
+            return a.recommended_usage_percentage != null
+              ? `${a.active_name} (${a.recommended_usage_percentage}%)`
+              : a.active_name || '';
+          })
+          .filter(Boolean)
+          .join(', ') || 'None (Base only)';
+      const concernsSummary = uniqueConcerns.join(', ') || 'None';
+
+      const cartDrawer = document.querySelector('cart-drawer');
+      const sectionsToRender = cartDrawer
+        ? ['cart-drawer', 'cart-icon-bubble']
+        : [];
+
+      const res = await fetch('/cart/add.js', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: [
+            {
+              id: CUSTOM_FORMULA_VARIANT_ID,
+              quantity: 1,
+              properties: {
+                'Base Formula': `${baseName} (${weightG}g)`,
+                'Active Ingredients': activesSummary,
+                'Skin Type': skinTypeLabel,
+                'Primary Concerns': concernsSummary,
+                _session_id: String(sessionId),
+              },
+            },
+          ],
+          sections: sectionsToRender,
+          sections_url: window.location.pathname,
+        }),
+      });
+
+      const cartData = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          cartData.description || cartData.message || 'Could not add to cart.'
+        );
+      }
+
+      setCartAdded(true);
+
+      if (cartDrawer && typeof cartDrawer.renderContents === 'function') {
+        cartDrawer.classList.remove('is-empty');
+        cartDrawer.renderContents(
+          cartData.items
+            ? { ...cartData.items[0], sections: cartData.sections }
+            : cartData
+        );
+      } else {
+        const cartIcon = document.querySelector(
+          '#cart-icon-bubble, a[href="/cart"]'
+        );
+        if (cartIcon) cartIcon.click();
+        else window.location.href = '/cart';
+      }
+    } catch (err) {
+      setOrderError(
+        err.message || 'Unable to add formula to cart right now. Please try again.'
+      );
+    } finally {
+      setIsAddingToCart(false);
+    }
+  };
+
   const handlePlaceOrder = async () => {
     if (!sessionId || isPlacingOrder || placedOrder) return;
     setIsPlacingOrder(true);
@@ -171,9 +297,36 @@ export default function RecommendationPage({ shopifyUser }) {
 
     try {
       const orderData = await placeOrder(sessionId);
-      setPlacedOrder(orderData);
+      const persistedState = orderData || { status: 'ORDER_PLACED' };
+      setPlacedOrder(persistedState);
+      try {
+        localStorage.setItem(
+          getOrderStorageKey(sessionId),
+          JSON.stringify(persistedState)
+        );
+      } catch {
+        // ignore storage errors
+      }
     } catch (err) {
-      setOrderError(err.message || 'Unable to place order right now. Please try again.');
+      if (
+        err.message &&
+        err.message.toLowerCase().includes('already placed')
+      ) {
+        const persistedState = { status: 'ORDER_PLACED' };
+        setPlacedOrder(persistedState);
+        try {
+          localStorage.setItem(
+            getOrderStorageKey(sessionId),
+            JSON.stringify(persistedState)
+          );
+        } catch {
+          // ignore
+        }
+      } else {
+        setOrderError(
+          err.message || 'Unable to place order right now. Please try again.'
+        );
+      }
     } finally {
       setIsPlacingOrder(false);
     }
@@ -332,40 +485,106 @@ export default function RecommendationPage({ shopifyUser }) {
             </div>
           )}
 
-          {/* Primary CTA: Place Order Button */}
+          {/* Dual CTA Row: Add to Cart (Left) + Place Order (Right) */}
           <div className="mt-[32px] flex flex-col items-center">
-            <button
-              type="button"
-              onClick={handlePlaceOrder}
-              disabled={isPlacingOrder || Boolean(placedOrder)}
-              style={{
-                backgroundColor: placedOrder ? '#1f6f61' : '#08060d',
-                color: '#ffffff',
-                fontWeight: 600,
-                fontSynthesis: 'weight',
-              }}
-              className="flex items-center justify-center gap-2 rounded-none px-[32px] py-[12px] text-[14px] tracking-wide transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-90"
-            >
-              {isPlacingOrder ? (
-                <>
-                  <Loader2 className="h-[16px] w-[16px] animate-spin" />
-                  <span>Placing Order...</span>
-                </>
-              ) : placedOrder ? (
-                <>
-                  <Check className="h-[16px] w-[16px]" />
-                  <span>
-                    Order Placed{' '}
-                    {placedOrder.order_name ? `(${placedOrder.order_name})` : ''}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span>Place Order</span>
-                  <span aria-hidden="true">→</span>
-                </>
-              )}
-            </button>
+            <div className="flex w-full max-w-[520px] flex-col gap-[12px] sm:flex-row">
+              {/* Left Button: Add to Cart (Black border, fills black on hover) */}
+              <button
+                type="button"
+                onClick={handleAddToCart}
+                onMouseEnter={() => setIsAddHovered(true)}
+                onMouseLeave={() => setIsAddHovered(false)}
+                disabled={isAddingToCart || isPlacingOrder}
+                className="product-form__submit button button--secondary button--full-width"
+                aria-haspopup="dialog"
+                style={{
+                  flex: 1,
+                  margin: 0,
+                  minHeight: '48px',
+                  borderRadius: '9999px',
+                  border: '1.5px solid #08060d',
+                  backgroundColor: isAddHovered ? '#08060d' : '#ffffff',
+                  color: isAddHovered ? '#ffffff' : '#08060d',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  letterSpacing: '0.1em',
+                  textTransform: 'uppercase',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  transition: 'all 0.2s ease',
+                  boxShadow: 'none',
+                }}
+              >
+                {isAddingToCart ? (
+                  <>
+                    <Loader2 className="h-[16px] w-[16px] animate-spin" />
+                    <span>Adding...</span>
+                  </>
+                ) : cartAdded ? (
+                  <>
+                    <Check className="h-[16px] w-[16px]" />
+                    <span>Added to cart</span>
+                  </>
+                ) : (
+                  <span>Add to cart</span>
+                )}
+              </button>
+
+              {/* Right Button: Place Order (Solid black #08060d background, white text) */}
+              <button
+                type="button"
+                onClick={handlePlaceOrder}
+                onMouseEnter={() => setIsOrderHovered(true)}
+                onMouseLeave={() => setIsOrderHovered(false)}
+                disabled={isPlacingOrder || Boolean(placedOrder)}
+                className="button button--primary button--full-width"
+                style={{
+                  flex: 1,
+                  margin: 0,
+                  minHeight: '48px',
+                  borderRadius: '9999px',
+                  border: placedOrder
+                    ? '1.5px solid #1f6f61'
+                    : '1.5px solid #08060d',
+                  backgroundColor: placedOrder
+                    ? '#1f6f61'
+                    : isOrderHovered
+                    ? '#221f29'
+                    : '#08060d',
+                  color: '#ffffff',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  letterSpacing: '0.1em',
+                  textTransform: 'uppercase',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  transition: 'all 0.2s ease',
+                  boxShadow: 'none',
+                  cursor: placedOrder ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {isPlacingOrder ? (
+                  <>
+                    <Loader2 className="h-[16px] w-[16px] animate-spin" />
+                    <span>Placing Order...</span>
+                  </>
+                ) : placedOrder ? (
+                  <>
+                    <Check className="h-[16px] w-[16px]" />
+                    <span>Order Placed</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Place Order</span>
+                    <span aria-hidden="true">→</span>
+                  </>
+                )}
+              </button>
+            </div>
 
             {orderError && (
               <p className="mt-[10px] text-center text-[13px] font-medium text-red-600">
